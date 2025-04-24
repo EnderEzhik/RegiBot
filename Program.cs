@@ -3,6 +3,8 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
+using Microsoft.Data.Sqlite;
+using Dapper;
 
 namespace RegiBot
 {
@@ -39,11 +41,34 @@ namespace RegiBot
     {
         private static CancellationTokenSource _cts;
         private static TelegramBotClient _botClient;
+        private static string dbConnection;
         private static Dictionary<long, Registration> registrations = new Dictionary<long, Registration>();
+        private const int MAX_COMMAND_SIZE = 3;
 
         static async Task Main(string[] args)
         {
             Env.Load();
+
+            dbConnection = Env.GetString("DB_CONNECTION");
+
+            if (string.IsNullOrEmpty(dbConnection))
+            {
+                throw new Exception("db connection string not found in environment");
+            }
+
+            using (var connection = new SqliteConnection($"Data Source={dbConnection}"))
+            {
+                await connection.ExecuteAsync(@"
+                    CREATE TABLE IF NOT EXISTS Users (
+                        Id          INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        FirstName   TEXT    NOT NULL,
+                        LastName    TEXT    NOT NULL,
+                        Age         INTEGER NOT NULL,
+                        PhoneNumber TEXT    NOT NULL,
+                        TeamId      TEXT
+                    );");
+            }
+
             _cts = new CancellationTokenSource();
             _botClient = new TelegramBotClient(Env.GetString("BOT_TOKEN"), cancellationToken: _cts.Token);
 
@@ -56,14 +81,14 @@ namespace RegiBot
 
             Console.WriteLine($"Bot {me.Username} is started... Press escape to terminate");
 
-            while(Console.ReadKey(true).Key != ConsoleKey.Escape) { }
+            while (Console.ReadKey(true).Key != ConsoleKey.Escape) { }
 
             _cts.Cancel();
         }
 
         private static async Task MessageHandler(Message message, UpdateType type)
         {
-            if(message.Text == "/start")
+            if (message.Text == "/start")
             {
                 string text = "Выберите тип регистрации:\n" +
                     "1 - Одиночная регистрация\n" +
@@ -103,7 +128,7 @@ namespace RegiBot
             var data = registrations[message.Chat.Id];
             var currentUser = data.Users[data.CurrentUser];
 
-            switch(data.CurrentStep)
+            switch (data.CurrentStep)
             {
                 case Step.FirstName:
                     currentUser.FirstName = message.Text;
@@ -132,7 +157,7 @@ namespace RegiBot
                     }
                     break;
                 case Step.Age:
-                    if(int.TryParse(message.Text, out int age))
+                    if (int.TryParse(message.Text, out int age))
                     {
                         currentUser.Age = age;
                         data.CurrentStep = Step.PhoneNumber;
@@ -153,14 +178,16 @@ namespace RegiBot
                 case Step.PhoneNumber:
                     currentUser.PhoneNumber = message.Text;
 
-                    if (data.RegistrationType == RegistrationType.Team && data.CurrentUser < 2 && data.Users.Count < 3)
+                    if (data.RegistrationType == RegistrationType.Team &&
+                        data.Users.Count < MAX_COMMAND_SIZE &&
+                        data.CurrentUser < MAX_COMMAND_SIZE - 1)
                     {
                         ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup(
-                            new[]
-                            {
-                                new KeyboardButton("Да"),
-                                new KeyboardButton("Нет")
-                            }
+                        new[]
+                        {
+                            new KeyboardButton("Да"),
+                            new KeyboardButton("Нет")
+                        }
                         ) { ResizeKeyboard = true };
                         await _botClient.SendMessage(message.Chat.Id, "Добавить еще одного участника? (максимум 3)", replyMarkup: keyboard);
                         data.CurrentStep = Step.End;
@@ -192,10 +219,27 @@ namespace RegiBot
         private static async Task CompleteRegistration(long chatId)
         {
             var data = registrations[chatId];
-            string text = data.RegistrationType == RegistrationType.Single ? "Спасибо, вы зарегистрированы!" : "Спасибо, ваша команда зарегистрирована!";
+            string? teamId = data.RegistrationType == RegistrationType.Team ? Guid.NewGuid().ToString() : null;
 
-            await _botClient.SendMessage(chatId, text);
+            for (int i = 0; i < data.Users.Count; i++)
+            {
+                await SaveUserToDatabase(data.Users[i], teamId);
+            }
+
             registrations.Remove(chatId);
+
+            string text = data.RegistrationType == RegistrationType.Single ? "Спасибо, вы зарегистрированы!" : "Спасибо, ваша команда зарегистрирована!";
+            await _botClient.SendMessage(chatId, text, replyMarkup: new ReplyKeyboardRemove());
+        }
+
+        private static async Task SaveUserToDatabase(UserData user, string? teamId)
+        {
+            using (var connection = new SqliteConnection($"Data Source={dbConnection}"))
+            {
+                await connection.ExecuteAsync("INSERT INTO Users (FirstName, LastName, Age, PhoneNumber, TeamId) " +
+                    "VALUES (@FirstName, @LastName, @Age, @PhoneNumber, @TeamId)",
+                    new { user.FirstName, user.LastName, user.Age, user.PhoneNumber, TeamId = teamId });
+            }
         }
     }
 }
