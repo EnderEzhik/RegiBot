@@ -64,7 +64,7 @@ namespace RegiBot
                         FirstName   TEXT    NOT NULL,
                         LastName    TEXT    NOT NULL,
                         Age         INTEGER NOT NULL,
-                        PhoneNumber TEXT    NOT NULL,
+                        PhoneNumber TEXT    NOT NULL UNIQUE,
                         TeamId      TEXT
                     );");
             }
@@ -101,6 +101,8 @@ namespace RegiBot
             {
                 if (message.Text == "1")
                 {
+                    await _botClient.SendMessage(message.Chat.Id, "Одиночная регистрация");
+
                     registrations[message.Chat.Id] = new Registration()
                     {
                         RegistrationType = RegistrationType.Single,
@@ -110,6 +112,8 @@ namespace RegiBot
                 }
                 else if (message.Text == "2")
                 {
+                    await _botClient.SendMessage(message.Chat.Id, "Регистрация команды");
+
                     registrations[message.Chat.Id] = new Registration()
                     {
                         RegistrationType = RegistrationType.Team,
@@ -120,54 +124,63 @@ namespace RegiBot
                 return;
             }
 
+            if (message.Text == "/cancel")
+            {
+                registrations.Remove(message.Chat.Id);
+
+                await _botClient.SendMessage(message.Chat.Id, "Регистрация отменена", replyMarkup: new ReplyKeyboardRemove());
+                return;
+            }
+
             await UserRegistration(message);
         }
 
         private static async Task UserRegistration(Message message)
         {
-            var data = registrations[message.Chat.Id];
-            var currentUser = data.Users[data.CurrentUser];
+            var registration = registrations[message.Chat.Id];
+            var currentUser = registration.Users[registration.CurrentUser];
 
-            switch (data.CurrentStep)
+            switch (registration.CurrentStep)
             {
                 case Step.FirstName:
                     currentUser.FirstName = message.Text;
-                    data.CurrentStep = Step.LastName;
+                    registration.CurrentStep = Step.LastName;
 
-                    if (data.RegistrationType == RegistrationType.Single)
+                    if (registration.RegistrationType == RegistrationType.Single)
                     {
                         await _botClient.SendMessage(message.Chat.Id, "Введите вашу фамилию");
                     }
-                    else if (data.RegistrationType == RegistrationType.Team)
+                    else
                     {
-                        await _botClient.SendMessage(message.Chat.Id, $"Введите фамилию {data.CurrentUser + 1}-го участника");
+                        await _botClient.SendMessage(message.Chat.Id, $"Введите фамилию {registration.CurrentUser + 1}-го участника");
                     }
                     break;
                 case Step.LastName:
                     currentUser.LastName = message.Text;
-                    data.CurrentStep = Step.Age;
+                    registration.CurrentStep = Step.Age;
 
-                    if (data.RegistrationType == RegistrationType.Single)
+                    if (registration.RegistrationType == RegistrationType.Single)
                     {
                         await _botClient.SendMessage(message.Chat.Id, "Введите ваш возраст");
                     }
-                    else if (data.RegistrationType == RegistrationType.Team)
+                    else
                     {
-                        await _botClient.SendMessage(message.Chat.Id, $"Введите возраст {data.CurrentUser + 1}-го участника");
+                        await _botClient.SendMessage(message.Chat.Id, $"Введите возраст {registration.CurrentUser + 1}-го участника");
                     }
                     break;
                 case Step.Age:
                     if (int.TryParse(message.Text, out int age))
                     {
                         currentUser.Age = age;
-                        data.CurrentStep = Step.PhoneNumber;
-                        if (data.RegistrationType == RegistrationType.Single)
+                        registration.CurrentStep = Step.PhoneNumber;
+
+                        if (registration.RegistrationType == RegistrationType.Single)
                         {
                             await _botClient.SendMessage(message.Chat.Id, "Введите ваш номер телефона");
                         }
-                        else if (data.RegistrationType == RegistrationType.Team)
+                        else
                         {
-                            await _botClient.SendMessage(message.Chat.Id, $"Введите номер телефона {data.CurrentUser + 1}-го участника");
+                            await _botClient.SendMessage(message.Chat.Id, $"Введите номер телефона {registration.CurrentUser + 1}-го участника");
                         }
                     }
                     else
@@ -176,12 +189,19 @@ namespace RegiBot
                     }
                     break;
                 case Step.PhoneNumber:
+                    if (await PhoneNumberRegistered(message.Text, registration))
+                    {
+                        await _botClient.SendMessage(message.Chat.Id, "Этот номер телефона уже зарегистрирован. Пожалуйста, введите другой");
+                        break;
+                    }
+
                     currentUser.PhoneNumber = message.Text;
 
-                    if (data.RegistrationType == RegistrationType.Team &&
-                        data.Users.Count < MAX_COMMAND_SIZE &&
-                        data.CurrentUser < MAX_COMMAND_SIZE - 1)
+                    if (registration.RegistrationType == RegistrationType.Team &&
+                        registration.Users.Count < MAX_COMMAND_SIZE)
                     {
+                        registration.CurrentStep = Step.End;
+
                         ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup(
                         new[]
                         {
@@ -190,7 +210,6 @@ namespace RegiBot
                         }
                         ) { ResizeKeyboard = true };
                         await _botClient.SendMessage(message.Chat.Id, "Добавить еще одного участника? (максимум 3)", replyMarkup: keyboard);
-                        data.CurrentStep = Step.End;
                     }
                     else
                     {
@@ -200,12 +219,12 @@ namespace RegiBot
                 case Step.End:
                     if (message.Text == "Да")
                     {
-                        data.Users.Add(new UserData());
-                        data.CurrentUser++;
-                        data.CurrentStep = Step.FirstName;
+                        registration.Users.Add(new UserData());
+                        registration.CurrentUser++;
+                        registration.CurrentStep = Step.FirstName;
 
                         await _botClient.SendMessage(message.Chat.Id,
-                            $"Введите имя {data.CurrentUser + 1}-го участника",
+                            $"Введите имя {registration.CurrentUser + 1}-го участника",
                             replyMarkup: new ReplyKeyboardRemove());
                     }
                     else
@@ -218,17 +237,17 @@ namespace RegiBot
 
         private static async Task CompleteRegistration(long chatId)
         {
-            var data = registrations[chatId];
-            string? teamId = data.RegistrationType == RegistrationType.Team ? Guid.NewGuid().ToString() : null;
+            var registration = registrations[chatId];
+            string? teamId = registration.RegistrationType == RegistrationType.Team ? Guid.NewGuid().ToString() : null;
 
-            for (int i = 0; i < data.Users.Count; i++)
+            for (int i = 0; i < registration.Users.Count; i++)
             {
-                await SaveUserToDatabase(data.Users[i], teamId);
+                await SaveUserToDatabase(registration.Users[i], teamId);
             }
 
             registrations.Remove(chatId);
 
-            string text = data.RegistrationType == RegistrationType.Single ? "Спасибо, вы зарегистрированы!" : "Спасибо, ваша команда зарегистрирована!";
+            string text = registration.RegistrationType == RegistrationType.Single ? "Спасибо, вы зарегистрированы!" : "Спасибо, ваша команда зарегистрирована!";
             await _botClient.SendMessage(chatId, text, replyMarkup: new ReplyKeyboardRemove());
         }
 
@@ -240,6 +259,24 @@ namespace RegiBot
                     "VALUES (@FirstName, @LastName, @Age, @PhoneNumber, @TeamId)",
                     new { user.FirstName, user.LastName, user.Age, user.PhoneNumber, TeamId = teamId });
             }
+        }
+
+        private static async Task<bool> PhoneNumberRegistered(string phoneNumber, Registration registration)
+        {
+            if (registration.Users.Select(u => u.PhoneNumber).Contains(phoneNumber))
+            {
+                return true;
+            }
+
+            using var connection = new SqliteConnection($"Data Source={dbConnection}");
+            var result = await connection.QueryAsync<int>($"SELECT COUNT(*) FROM Users WHERE PhoneNumber=@phoneNumber", new { phoneNumber });
+
+            if(result.First() > 0)
+            {
+                return true;
+            }
+
+            return false;
         }
     }
 }
